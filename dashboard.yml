@@ -1,0 +1,11 @@
+apiVersion: traefik.containo.us/v1alpha1
+kind: IngressRoute
+metadata:
+  name: dashboard
+spec:
+  routes:
+    - match: Host(`dash.lvh.me`)
+      kind: Rule
+      services:
+        - name: api@internal
+          kind: TraefikService

@@ -1,0 +1,63 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: forward-auth
+  labels:
+    app: forward-auth
+spec:
+  selector:
+    matchLabels:
+      app: forward-auth
+  template:
+    metadata:
+      labels:
+        app: forward-auth
+    spec:
+      containers:
+      - image: thomseddon/traefik-forward-auth:latest
+        name: forward-auth
+        ports:
+        - containerPort: 4181
+        args:
+        - --log-level=trace
+        - --secret=bc989147a1d2ff433933b39b40b9b1d0
+        - --auth-host=auth.lvh.me
+        - --cookie-domain=lvh.me
+        - --default-provider=oidc
+        - --providers.oidc.issuer-url=https://dex:5556/
+        - --providers.oidc.client-id=forward-auth
+        - --providers.oidc.client-secret=6bbc3f2a6d55a3917e068dff5b07a476
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: forward-auth
+spec:
+  selector:
+    app: forward-auth
+  ports:
+  - port: 4181
+---
+apiVersion: networking.k8s.io/v1beta1
+kind: Ingress
+metadata:
+  name: forward-auth
+spec:
+  rules:
+  - host: auth.lvh.me
+    http:
+      paths:
+      - path: /
+        backend:
+          serviceName: forward-auth
+          servicePort: 4181
+---
+apiVersion: traefik.containo.us/v1alpha1
+kind: Middleware
+metadata:
+  name: auth
+spec:
+  forwardAuth:
+    address: http://forward-auth:4181
+    authResponseHeaders:
+    - X-Forwarded-User
