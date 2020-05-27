@@ -1,0 +1,208 @@
+# Namespace for Traefik to live in.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: traefik
+---
+# A service account so Traefik can connect to the Kubernetes API to discover routes.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: traefik
+  namespace: traefik
+---
+# An RBAC role for use with the above service account.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: traefik
+rules:
+# Allow read-only access to services/endpoints for service discovery, and secrets for TLS keys.
+- apiGroups: [""]
+  resources: [services, endpoints, secrets]
+  verbs: [get, list, watch]
+# Allow read-only access to ingresses for dynamic discovery there too.
+- apiGroups: [extensions]
+  resources: [ingresses]
+  verbs: [get, list, watch]
+# Allow writing to the ingress status data to update the external IP field.
+- apiGroups: [extensions]
+  resources: [ingresses/status]
+  verbs: [update]
+# Allow read-only access to all Traefik custom resources.
+- apiGroups: [traefik.containo.us]
+  resources: ["*"]
+  verbs: [get, list, watch]
+---
+# Bind the service account and the RBAC role together.
+kind: ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: traefik
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: traefik
+subjects:
+- kind: ServiceAccount
+  name: traefik
+  namespace: traefik
+---
+# A service to expose Traefik to the outside world.
+apiVersion: v1
+kind: Service
+metadata:
+  name: traefik
+  namespace: traefik
+spec:
+  # Use a LoadBalancer type to get a single public IP.
+  type: LoadBalancer
+  selector:
+    app: traefik
+  # Expose both HTTP and HTTPS.
+  ports:
+  - port: 80
+    name: http
+    targetPort: http
+  - port: 443
+    name: https
+    targetPort: https
+---
+# Traefik config file as a ConfigMap, mounted into the container below.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: traefik-config
+  namespace: traefik
+data:
+  traefik.toml: |
+    # Don't talk to the network on startup.
+    [global]
+    checkNewVersion = false
+    sendAnonymousUsage = false
+
+    # Unfortunately Traefik makes it impossible to validate backend certs as it uses the
+    # pod IP to connect, not a name. Tracked in https://github.com/containous/traefik/issues/4835.
+    [serversTransport]
+    insecureSkipVerify = true
+
+    # Internal, HTTP, and HTTPS entrypoints.
+    [entryPoints.traefik]
+    address = ":9000"
+    [entryPoints.http]
+    address = ":8000"
+    [entryPoints.https]
+    address = ":8443"
+    [entryPoints.https.http.tls]
+    certResolver = "default"
+
+    # Enable the API and dashboard.
+    [api]
+
+    # Enable the health check endpoint.
+    [ping]
+
+    # Discover routes from IngressRoute custom objects.
+    [providers.kubernetescrd]
+
+    # Discover routes from Ingress objects.
+    [providers.kubernetesingress]
+    [providers.kubernetesIngress.ingressEndpoint]
+    publishedService = "traefik/traefik"
+---
+# Run Traefik!
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: traefik
+  namespace: traefik
+spec:
+  replicas: 1 # In a real deployment, set this to 2 or more for redundancy.
+  selector:
+    matchLabels:
+      app: traefik
+  template:
+    metadata:
+      labels:
+        app: traefik
+    spec:
+      # Use the service account we set up before.
+      serviceAccountName: traefik
+      containers:
+      - name: traefik
+        image: traefik:2.2.1
+        readinessProbe:
+          httpGet:
+            path: /ping
+            port: traefik
+          failureThreshold: 1
+          initialDelaySeconds: 10
+          timeoutSeconds: 2
+        livenessProbe:
+          httpGet:
+            path: /ping
+            port: traefik
+          initialDelaySeconds: 10
+          timeoutSeconds: 2
+        # Expose all three entrypoints defined in the config.
+        ports:
+        - name: traefik
+          containerPort: 9000
+        - name: http
+          containerPort: 8000
+        - name: https
+          containerPort: 8443
+        # Mount in the config file.
+        volumeMounts:
+        - name: config
+          mountPath: /etc/traefik
+        # Per-container security settings, drop as many permissions as possible.
+        securityContext:
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+          runAsGroup: 65532
+          runAsNonRoot: true
+          runAsUser: 65532
+      # Pod level security settings.
+      securityContext:
+        fsGroup: 65532
+      # Wait a little longer during shutdown to give time for requests to finish.
+      terminationGracePeriodSeconds: 60
+      # If we have multiple replicas, try to spread them between availability zones.
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              topologyKey: topology.kubernetes.io/zone
+              labelSelector:
+                matchLabels:
+                  app: traefik
+          - weight: 1
+            podAffinityTerm:
+              topologyKey: kubernetes.io/hostname
+              labelSelector:
+                matchLabels:
+                  app: traefik
+      # Load the configuration file as a volume.
+      volumes:
+      - name: config
+        configMap:
+          name: traefik-config
+---
+# Expose the dasboard.
+# THIS HAS NO AUTHENTICATION WHICH IS NOT A GOOD IDEA ON A REAL CLUSTER, ONLY SET UP LIKE THIS FOR DEBUGGING LOCALLY.
+apiVersion: traefik.containo.us/v1alpha1
+kind: IngressRoute
+metadata:
+  name: dashboard
+  namespace: traefik
+spec:
+  routes:
+  - match: Host(`dash.lvh.me`)
+    kind: Rule
+    services:
+    - name: api@internal
+      kind: TraefikService

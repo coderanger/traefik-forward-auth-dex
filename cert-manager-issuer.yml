@@ -1,0 +1,32 @@
+# A global selfsigned issuer, used for settings up CA certs.
+apiVersion: cert-manager.io/v1alpha2
+kind: ClusterIssuer
+metadata:
+  name: selfsigned
+spec:
+  selfSigned: {}
+---
+# Create the CA cert for the local-ca issuer.
+apiVersion: cert-manager.io/v1alpha2
+kind: Certificate
+metadata:
+  name: local-ca
+  namespace: cert-manager
+spec:
+  secretName: local-ca
+  commonName: local-ca
+  isCA: true
+  issuerRef:
+    kind: ClusterIssuer
+    name: selfsigned
+  usages:
+  - any
+---
+# A global issuer using the local CA keypair.
+apiVersion: cert-manager.io/v1alpha2
+kind: ClusterIssuer
+metadata:
+  name: local-ca
+spec:
+  ca:
+    secretName: local-ca

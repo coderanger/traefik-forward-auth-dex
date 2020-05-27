@@ -1,9 +1,9 @@
+# Run forward-auth.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: forward-auth
-  labels:
-    app: forward-auth
+  namespace: traefik
 spec:
   selector:
     matchLabels:
@@ -14,34 +14,53 @@ spec:
         app: forward-auth
     spec:
       containers:
-      - image: thomseddon/traefik-forward-auth:latest
-        name: forward-auth
+      - name: forward-auth
+        image: thomseddon/traefik-forward-auth:latest
         ports:
         - containerPort: 4181
         args:
-        - --log-level=trace
+        # Random value used for encrypting cookies, pick a new one.
         - --secret=bc989147a1d2ff433933b39b40b9b1d0
+        # The only hard rule of auth-host mode is that the auth-host must be a subdomain of cookie-domain.
         - --auth-host=auth.lvh.me
         - --cookie-domain=lvh.me
+        # If using either Google auth or a provider that supports OIDC directly, change these values.
         - --default-provider=oidc
-        - --providers.oidc.issuer-url=https://dex:5556/
+        - --providers.oidc.issuer-url=https://dex.dex:5556/
         - --providers.oidc.client-id=forward-auth
-        - --providers.oidc.client-secret=6bbc3f2a6d55a3917e068dff5b07a476
+        - --providers.oidc.client-secret=6bbc3f2a6d55a3917e068dff5b07a476 # Must match Dex's staticClient.
+        # Insert the local CA cert into the trust store.
+        volumeMounts:
+        - name: tls
+          mountPath: /etc/ssl/certs/dex.crt
+          subPath: ca.crt
+      volumes:
+      - name: tls
+        secret:
+          secretName: forward-auth-tls
 ---
+# Service for Traefik to talk to Forward-Auth.
 apiVersion: v1
 kind: Service
 metadata:
   name: forward-auth
+  namespace: traefik
 spec:
   selector:
     app: forward-auth
   ports:
   - port: 4181
 ---
+# Expose forward-auth to the internet for OAuth initialization and callbacks.
 apiVersion: networking.k8s.io/v1beta1
 kind: Ingress
 metadata:
   name: forward-auth
+  namespace: traefik
+  annotations:
+    # While possibly unexpected, this is required for the OAuth callback to process correctly.
+    # It will never actually return a 200 so it's mostly just a protocol issue.
+    traefik.ingress.kubernetes.io/router.middlewares: traefik-forward-auth-dex@kubernetescrd
 spec:
   rules:
   - host: auth.lvh.me
@@ -52,12 +71,28 @@ spec:
           serviceName: forward-auth
           servicePort: 4181
 ---
+# Register a middleware with Traefik to use this forward-auth instance.
 apiVersion: traefik.containo.us/v1alpha1
 kind: Middleware
 metadata:
-  name: auth
+  name: forward-auth-dex
+  namespace: traefik
 spec:
   forwardAuth:
-    address: http://forward-auth:4181
+    address: http://forward-auth.traefik:4181
     authResponseHeaders:
     - X-Forwarded-User
+---
+# Traefik-forward-auth itself does not yet support TLS, but we still need to grab the ca.crt for talking to Dex.
+apiVersion: cert-manager.io/v1alpha2
+kind: Certificate
+metadata:
+  name: forward-auth-tls
+  namespace: traefik
+spec:
+  secretName: forward-auth-tls
+  issuerRef:
+    kind: ClusterIssuer
+    name: local-ca
+  dnsNames:
+  - unused
